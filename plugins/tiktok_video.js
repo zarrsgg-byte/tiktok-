@@ -1,6 +1,5 @@
 const fetch = require('node-fetch');
 const fs = require('fs');
-const { PassThrough } = require('stream');
 const sleep = require('../utils/sleep');
 
 const commonHeaders = {
@@ -11,10 +10,11 @@ const commonHeaders = {
   'Connection': 'keep-alive'
 };
 
-/* ─────────────────────────────
-   دالة إرسال تيك توك مباشرة عبر Stream
-   Rate Limited Message Sender
-───────────────────────────── */
+const escapeHtml = (text) =>
+  typeof text === 'string'
+    ? text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    : String(text || '');
+
 async function sendWithRetry(bot, method, chatId, ...args) {
   let attempts = 0;
   const maxAttempts = 5;
@@ -38,9 +38,25 @@ async function sendWithRetry(bot, method, chatId, ...args) {
   }
 }
 
+async function sendVideoSafe(bot, chatId, videoStream, options) {
+  try {
+    return await sendWithRetry(bot, 'sendVideo', chatId, videoStream, options);
+  } catch (e) {
+    if (e.message?.includes('parse') || e.message?.includes('entities') || e.message?.includes('400')) {
+      const fallbackOptions = { ...options };
+      delete fallbackOptions.parse_mode;
+      fallbackOptions.caption = options.caption
+        ? options.caption.replace(/<[^>]+>/g, '')
+        : undefined;
+      return await sendWithRetry(bot, 'sendVideo', chatId, videoStream, fallbackOptions);
+    }
+    throw e;
+  }
+}
+
 async function tiktok_video(bot, msg, data, languages, userLanguage) {
   const chatId = msg.chat.id;
-  const lang = userLanguage[chatId] || 'en';
+  const lang = userLanguage[String(msg.from?.id || chatId)] || userLanguage[chatId] || 'en';
   const t = (k) => languages?.[lang]?.[k] || languages?.en?.[k] || k;
 
   const title = data?.title || 'TikTok Video';
@@ -48,80 +64,91 @@ async function tiktok_video(bot, msg, data, languages, userLanguage) {
   const videoUrl = data?.video?.[0];
   const audioUrl = data?.audio?.[0];
   const isSlideshowVideo = data?.isSlideshowVideo || false;
+  const linkOnly = data?.linkOnly || false;
 
-  const escapeMarkdown = (text) => typeof text === 'string' ? text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&') : text;
-
-  if (!videoUrl) return sendWithRetry(bot, 'sendMessage', chatId, '❌ No video found.');
+  if (!videoUrl && !linkOnly) return sendWithRetry(bot, 'sendMessage', chatId, '❌ No video found.');
+  if (!videoUrl && !data?.original_video) return sendWithRetry(bot, 'sendMessage', chatId, '❌ No video found.');
 
   try {
-    // 1️⃣ إرسال الفيديو مباشرة كـ Stream
-    const finalVideoUrl = videoUrl.startsWith('//') ? `https:${videoUrl}` : videoUrl;
-    const isLocalFile = !finalVideoUrl.startsWith('http');
-    const buttonUrl = data?.original_video || (isLocalFile ? '' : finalVideoUrl);
-    console.log('[DEBUG] Processing video from:', finalVideoUrl, 'isLocal:', isLocalFile, 'ButtonURL:', buttonUrl);
-    
+    const finalVideoUrl = videoUrl
+      ? (videoUrl.startsWith('//') ? `https:${videoUrl}` : videoUrl)
+      : null;
+    const isLocalFile = finalVideoUrl && !finalVideoUrl.startsWith('http');
+    const buttonUrl = data?.original_video || (!isLocalFile ? finalVideoUrl : '');
+
+    const keyboard = [];
+    if (buttonUrl && buttonUrl.startsWith('http')) {
+      keyboard.push([{ text: `🎥 ${isSlideshowVideo ? t('url_slideshow_video') : t('url_video') || 'Watch Video'}`, url: buttonUrl }]);
+      const sdUrl = buttonUrl.replace('hd=1', 'hd=0');
+      if (sdUrl !== buttonUrl) {
+        keyboard.push([{ text: `📉 ${t('data_saver') || 'Data Saver Mode (SD)'}`, url: sdUrl }]);
+      }
+    }
+
+    const botMe = await bot.getMe().catch(() => ({ username: 'bot' }));
+
+    if (audioUrl) {
+      const { audioMap } = require('../utils/audioStore');
+      const audioId = `video_${Date.now()}`;
+      audioMap.set(audioId, audioUrl.startsWith('//') ? `https:${audioUrl}` : audioUrl);
+      keyboard.push([{ text: `🎵 ${t('audio')} (${t('original') || 'Original'}) | @${botMe.username}`, callback_data: `audio_${audioId}` }]);
+    }
+
+    keyboard.push([{ text: `🚀 ${t('powered_by') || 'Powered by'} @zamasuuuuuuu`, url: 'https://t.me/zamasuuuuuuu' }]);
+
+    const captionText = [
+      `<b>${isSlideshowVideo ? '🖼️ ' + escapeHtml(t('slideshow_video') || 'Slideshow Video') : '🎥 ' + escapeHtml(t('video') || 'Video')}</b>`,
+      ``,
+      `📌 <b>${escapeHtml(t('title') || 'Title')}</b>: ${escapeHtml(title)}`,
+      `🎵 <b>${escapeHtml(t('audio') || 'Audio')}</b>: ${escapeHtml(titleAudio)}`,
+      data.transcript ? `\n📝 <b>${escapeHtml(t('transcript') || 'Transcript')}</b>:\n${escapeHtml(data.transcript)}` : ''
+    ].join('\n').replace(/\n{3,}/g, '\n\n').substring(0, 1024);
+
+    if (linkOnly || !finalVideoUrl) {
+      return await sendWithRetry(bot, 'sendMessage', chatId, captionText, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: keyboard }
+      });
+    }
+
     let videoStream;
     if (isLocalFile) {
       if (!fs.existsSync(finalVideoUrl)) throw new Error('Local video file not found');
       videoStream = fs.createReadStream(finalVideoUrl);
     } else {
       const videoResponse = await fetch(finalVideoUrl, {
-        headers: {
-          ...commonHeaders,
-          'Cookie': 'tt_webid_v2=7200000000000000000'
-        },
+        headers: { ...commonHeaders, 'Cookie': 'tt_webid_v2=7200000000000000000' },
         timeout: 180000
       });
       if (!videoResponse.ok) throw new Error(`Video fetch failed: ${videoResponse.status}`);
       videoStream = videoResponse.body;
     }
 
-    const keyboard = [];
-    if (buttonUrl && buttonUrl.startsWith('http')) {
-      keyboard.push([{ text: `🎥 ${isSlideshowVideo ? t('url_slideshow_video') : t('url_video')}`, url: buttonUrl }]);
-      keyboard.push([{ text: `📉 ${t('data_saver') || 'Data Saver Mode (SD)'}`, url: buttonUrl.replace('hd=1', 'hd=0') }]);
-    }
-
-    const botMe = await bot.getMe();
-    if (audioUrl) {
-      const { audioMap } = require('../utils/audioStore');
-      const audioId = `video_${Date.now()}`;
-      audioMap.set(audioId, audioUrl.startsWith('//') ? `https:${audioUrl}` : audioUrl);
-      keyboard.push([{ text: `🎵 ${t('audio')} (${t('original') || 'Original'}) | ${t('by') || 'By'} @${botMe.username}`, callback_data: `audio_${audioId}` }]);
-    }
-
-    // Extract audio from local video
     if (isLocalFile) {
       try {
         const { extractAudio } = require('../handler');
         const { audioMap } = require('../utils/audioStore');
         const extractedAudioPath = await extractAudio(finalVideoUrl);
-        if (fs.existsSync(extractedAudioPath)) {
+        if (extractedAudioPath && fs.existsSync(extractedAudioPath)) {
           const audioId = `video_ext_${Date.now()}`;
           audioMap.set(audioId, extractedAudioPath);
-          keyboard.push([{ text: `🎵 ${t('audio')} (${t('extracted') || 'Extracted'}) | ${t('by') || 'By'} @${botMe.username}`, callback_data: `audio_${audioId}` }]);
+          keyboard.splice(keyboard.length - 1, 0, [{
+            text: `🎵 ${t('audio')} (${t('extracted') || 'Extracted'}) | @${botMe.username}`,
+            callback_data: `audio_${audioId}`
+          }]);
         }
       } catch (audioErr) {
-        console.error('[AUDIO EXTRACTION ERROR]', audioErr.message);
+        console.warn('[AUDIO EXTRACTION SKIPPED]', audioErr.message);
       }
     }
 
-    keyboard.push([{ text: `🚀 ${t('powered_by')} @zamasuuuuuuu`, url: 'https://t.me/zamasuuuuuuu' }]);
-
-    const captionText = `*${isSlideshowVideo ? '🖼️ ' + escapeMarkdown(t('slideshow_video')) : '🎥 ' + escapeMarkdown(t('video'))}*\n\n📌 *${escapeMarkdown(t('title'))}*: ${escapeMarkdown(title)}\n🎵 *${escapeMarkdown(t('audio'))}*: ${escapeMarkdown(titleAudio)}${data.transcript ? `\n\n📝 *${escapeMarkdown(t('transcript'))}*:\n${escapeMarkdown(data.transcript)}` : ''}`.substring(0, 1024);
-
-    const attributionText = escapeMarkdown(`${t('by')} @${botMe.username}`);
-
-    await sendWithRetry(bot, 'sendVideo', chatId, videoStream, {
+    await sendVideoSafe(bot, chatId, videoStream, {
       caption: captionText,
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       supports_streaming: true,
-      reply_markup: {
-        inline_keyboard: keyboard
-      }
+      reply_markup: { inline_keyboard: keyboard }
     });
 
-    // Clean up local temp file
     if (isLocalFile) {
       fs.unlink(finalVideoUrl, () => {});
     }
@@ -129,13 +156,7 @@ async function tiktok_video(bot, msg, data, languages, userLanguage) {
     await sleep(1000);
 
   } catch (err) {
-    // Log technical details exclusively to developer console
-    console.error(`[TIKTOK ERROR] ${chatId}:`, {
-      message: err.message,
-      stack: err.stack,
-      video_url: videoUrl
-    });
-    // Rethrow to ensure consistent user feedback from the handler
+    console.error(`[TIKTOK_VIDEO ERROR] ${chatId}:`, { message: err.message, video_url: videoUrl });
     throw err;
   }
 }
