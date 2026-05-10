@@ -198,6 +198,51 @@ const escapeMarkdown = (text) => {
   return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 };
 
+const getSuggestedSolution = (errorMsg = '') => {
+  const msg = errorMsg.toLowerCase();
+  if (msg.includes('413') || msg.includes('request entity too large') || msg.includes('output_too_large'))
+    return '📦 الفيديو أكبر من 50MB — اضغط أكثر أو أرسله كرابط مباشر.';
+  if (msg.includes('400') && (msg.includes('parse') || msg.includes('entities')))
+    return '✏️ خطأ في تنسيق الرسالة — تحقق من escaping الكابشن أو استخدم HTML بدل Markdown.';
+  if (msg.includes('403') || msg.includes('forbidden'))
+    return '🔒 الرابط محجوب أو منتهي — جرب hdplay أو play أو wmplay بالترتيب.';
+  if (msg.includes('eai_again') || msg.includes('enotfound'))
+    return '🌐 فشل DNS — تحقق من الاتصال بالإنترنت وأعد المحاولة بعد قليل.';
+  if (msg.includes('etimedout') || msg.includes('timeout'))
+    return '⏱️ انتهت مهلة الاتصال — زد قيمة timeout أو تحقق من ضغط السيرفر.';
+  if (msg.includes('504') || msg.includes('gateway timeout'))
+    return '🔄 Telegram gateway timeout — أعد الإرسال مع exponential backoff.';
+  if (msg.includes('429') || msg.includes('too many requests'))
+    return '🚦 تجاوزت حد Rate Limit — قلل تكرار الرسائل وفعّل cooldown.';
+  if (msg.includes('no data extracted') || msg.includes('all video urls failed'))
+    return '🔍 فشل استخراج المحتوى — تحقق من صحة الرابط وحالة TikTok API.';
+  if (msg.includes('local video file not found'))
+    return '💾 الملف المؤقت مفقود — تحقق من المساحة الحرة ومجلد temp/.';
+  if (msg.includes('ffmpeg') || msg.includes('transcod'))
+    return '🎞️ خطأ FFmpeg — تحقق من تثبيت ffmpeg وصحة الفيديو المصدر.';
+  if (msg.includes('econnreset') || msg.includes('econnrefused'))
+    return '🔌 انقطع الاتصال — أعد المحاولة أو تحقق من إعدادات الشبكة.';
+  if (msg.includes('sharp') || msg.includes('image'))
+    return '🖼️ خطأ في معالجة الصورة — تحقق من صحة الصورة أو تخطَّها.';
+  return '🔧 خطأ غير معروف — راجع اللوغات للحصول على مزيد من التفاصيل.';
+};
+
+const getCallerFile = () => {
+  try {
+    const lines = (new Error().stack || '').split('\n');
+    for (const line of lines) {
+      if (line.includes('main.js') && line.includes('logs')) continue;
+      if (line.includes('node_modules') || line.includes('node:')) continue;
+      const match = line.match(/at\s+(?:\S+\s+)?\(?([^)]+\.js):(\d+):\d+\)?/);
+      if (match) {
+        const fileName = match[1].replace(/.*[\\/]/, '');
+        return `${fileName}:${match[2]}`;
+      }
+    }
+  } catch {}
+  return '';
+};
+
 const logs = async (type, message, details = {}, skipTelegram = false) => {
   const timestamp = new Date().toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta' });
   let color, prefix;
@@ -210,7 +255,9 @@ const logs = async (type, message, details = {}, skipTelegram = false) => {
     default: color = chalk.white; prefix = '[LOG]';
   }
 
-  const logMessage = `${prefix} [${timestamp}] ${message}`;
+  const file = getCallerFile();
+  const fileTag = file ? ` (${file})` : '';
+  const logMessage = `${prefix} [${timestamp}]${fileTag} ${message}`;
   console.log(color(logMessage));
   if (details && Object.keys(details).length) {
     console.log(color(Object.entries(details).map(([k, v]) => `  ${k}: ${v}`).join('\n')));
@@ -222,25 +269,61 @@ const logs = async (type, message, details = {}, skipTelegram = false) => {
       return;
     }
 
-    const errorNotify = `🚨 SYSTEM ERROR\n\nTime: ${timestamp}\nMessage: ${escapeMarkdown(message)}\nDetails:\n\`\`\`json\n${escapeMarkdown(JSON.stringify(details, null, 2))}\n\`\`\``;
+    const escapeHtmlLocal = (t) => typeof t === 'string' ? t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : String(t || '');
 
-    const sendWithRetry = async (chatId, text, retries = 5) => {
+    const extractFileInfo = () => {
+      try {
+        const err = new Error();
+        const lines = (err.stack || '').split('\n');
+        for (const line of lines) {
+          if (line.includes('node_modules') || line.includes('node:') || line.includes('logs (')) continue;
+          const match = line.match(/at\s+(?:\S+\s+)?\(?([^)]+\.js):(\d+):(\d+)\)?/);
+          if (match) {
+            const fileName = match[1].replace(/.*[\\/]/, '');
+            return `${fileName}:${match[2]}`;
+          }
+        }
+      } catch {}
+      return 'unknown';
+    };
+
+    const fileInfo = details?.File || extractFileInfo();
+    const detailsJson = JSON.stringify(details, null, 2);
+
+    const solution = getSuggestedSolution(message);
+
+    const htmlNotify = `🚨 <b>SYSTEM ERROR</b>\n\n` +
+      `📂 <b>File:</b> <code>${escapeHtmlLocal(fileInfo)}</code>\n` +
+      `🕒 <b>Time:</b> ${timestamp}\n` +
+      `📌 <b>Message:</b> ${escapeHtmlLocal(message)}\n` +
+      `💡 <b>Suggested Fix:</b> ${escapeHtmlLocal(solution)}\n` +
+      `📄 <b>Details:</b>\n<pre>${escapeHtmlLocal(detailsJson)}</pre>`;
+
+    const plainNotify = `🚨 SYSTEM ERROR\n\n` +
+      `📂 File: ${fileInfo}\n` +
+      `🕒 Time: ${timestamp}\n` +
+      `📌 Message: ${message}\n` +
+      `💡 Suggested Fix: ${solution}\n` +
+      `📄 Details:\n${detailsJson}`;
+
+    const sendWithRetry = async (chatId, retries = 5) => {
       for (let i = 0; i < retries; i++) {
         try {
-          await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+          await bot.sendMessage(chatId, htmlNotify, { parse_mode: 'HTML' });
           return true;
         } catch (e) {
           if (e.response?.body?.retry_after) {
             const delay = e.response.body.retry_after * 1000 + 1000;
-            logs('warning', `Rate limited. Retrying after ${delay}ms`, { chatId }, true);
             await new Promise(r => setTimeout(r, delay));
           } else if (e.message?.includes('429') || e.message?.includes('502') || e.message?.includes('503')) {
-            const delay = (i + 1) * 3000;
-            logs('warning', `Temporary error. Retrying after ${delay}ms`, { error: e.message }, true);
-            await new Promise(r => setTimeout(r, delay));
+            await new Promise(r => setTimeout(r, (i + 1) * 3000));
           } else {
-            logs('error', `Failed to send message: ${e.message}`, { chatId }, true);
-            break;
+            try {
+              await bot.sendMessage(chatId, plainNotify);
+              return true;
+            } catch {
+              break;
+            }
           }
         }
       }
@@ -249,10 +332,10 @@ const logs = async (type, message, details = {}, skipTelegram = false) => {
 
     let sent = false;
     if (GROUP_ID) {
-      sent = await sendWithRetry(GROUP_ID, errorNotify);
+      sent = await sendWithRetry(GROUP_ID);
     }
     if (!sent && DEVELOPER_ID) {
-      await sendWithRetry(DEVELOPER_ID, errorNotify);
+      await sendWithRetry(DEVELOPER_ID);
     }
   }
 };
@@ -262,9 +345,31 @@ bot.on('error', (err) => {
   logs('error', 'Global Bot Error', { message: err.message }, is429or502);
 });
 
+let pollingRestartTimeout = null;
 bot.on('polling_error', (error) => {
-  const is429or502 = error.message?.includes('429') || error.message?.includes('502');
-  logs('error', 'Polling error', { Error: error.message }, is429or502);
+  const msg = error.message || '';
+  const is429or502 = msg.includes('429') || msg.includes('502');
+  const isNetworkError = msg.includes('EAI_AGAIN') || msg.includes('ETIMEDOUT') ||
+                         msg.includes('504') || msg.includes('ECONNRESET') ||
+                         msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED');
+
+  logs('error', 'Polling error', { Error: msg }, is429or502 || isNetworkError);
+
+  if (isNetworkError && !pollingRestartTimeout) {
+    const delay = 15000;
+    console.warn(`[POLLING] Network error detected, restarting polling in ${delay / 1000}s...`);
+    pollingRestartTimeout = setTimeout(async () => {
+      pollingRestartTimeout = null;
+      try {
+        await bot.stopPolling();
+        await new Promise(r => setTimeout(r, 3000));
+        await bot.startPolling();
+        console.log('[POLLING] Polling restarted successfully after network error.');
+      } catch (e) {
+        console.error('[POLLING] Failed to restart polling:', e.message);
+      }
+    }, delay);
+  }
 });
 
 displayBanner();
@@ -354,8 +459,7 @@ async function queryAI(chatId, userMessage, lang = 'en') {
     const ai_response = response.data.content || response.data.message || JSON.stringify(response.data);
     conversationHistory[chatId].push({ role: 'assistant', content: ai_response });
     
-    // Escape markdown for AI responses to prevent parsing errors
-    return escapeMarkdown(ai_response);
+    return ai_response;
   } catch (error) {
     logs('error', 'AI API request failed', { ChatID: chatId, Error: error.message });
     return escapeMarkdown(getMessage(lang, 'processing_error'));
@@ -807,8 +911,8 @@ bot.on('message', async (msg) => {
         Response: res.length > 50 ? res.slice(0, 47) + '...' : res
       });
       
-      await bot.sendMessage(chatId, res, { 
-        parse_mode: 'Markdown' 
+      await bot.sendMessage(chatId, res).catch(async () => {
+        await bot.sendMessage(chatId, res.replace(/[*_`[\]]/g, ''));
       });
     }
   } catch (e) {
