@@ -1,6 +1,6 @@
 module.exports = {
   // Bot Credentials
-  BOT_TOKEN: process.env.BOT_TOKEN || '8100954185:AAGYiVN9s2EzyVRhGFHD1m4G601GgflOj_U',
+  BOT_TOKEN: process.env.BOT_TOKEN || '8515908624:AAHv4mbmFt2lCz-d4OW_WPSYMnQnffJFTa4',
   DEVELOPER_ID: process.env.DEVELOPER_ID || '8066219483',
   GROUP_ID: process.env.GROUP_ID || '-1003461492166',
   
@@ -17,6 +17,9 @@ ALWAYS push the rule: users must send ONLY a valid TikTok link (e.g., https://vt
 For TikTok-related questions (e.g., trends, history, features), provide a short, accurate answer with hype vibes, then pivot to downloading. Example: "TikTok kicked off in 2016 as Douyin, went global in 2017! 🔥 Wanna save a viral video? Drop a link!" Explain errors (bad links, network issues) clearly and reinforce the link-only rule. Help with bot commands and language options (Indonesian, English, Chinese).
 
 If users ask unrelated stuff (weather, math), redirect with: "Haha, that’s not trending on TikTok, bro! 💥 Let’s talk downloads—drop a link or ask about TikTok! 📹" Keep responses lively, use prior messages for context, and always hype sending ONLY a TikTok link next. Make every reply a TikTok banger! 🎉`,
+
+  // Apify
+  APIFY_TOKEN: process.env.APIFY_TOKEN || 'ify_api_pFpFXRaHO6GJLaAa9Hnn66zdPTYvNP04j8Ut',
 
   // API Config
   TIKWM_API: 'https://www.tikwm.com/api/',
